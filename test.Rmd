@@ -1,0 +1,195 @@
+---
+title: "Analitički izveštaj"
+author: "Relja Mihić E2 5-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Korišćeni podaci i tehnologije
+
+Podaci se mogu preuzeti sa javnog izvora podataka: <https://fdc.nal.usda.gov/download-datasets.html>
+
+Korišćen je skup najnovijih podataka o označenim namirnicama: **branded**, izdat *4/2024*, veličine *2.8GB*.
+
+Učitavanje i sređivanje podataka urađeno je u programskom jeziku *R*, dok je za klasifikaciju i klasterizaciju pored tehnologije *R* korišćen *Apache Spark* kroz biblioteku *sparklyr*.
+
+Spisak korišćenih biblioteka:
+```{r}
+library(dplyr)
+library(tidyr)
+library(class)
+library(sparklyr)
+library(data.table)
+library(e1071)
+library(rpart)
+library(randomForest)
+```
+
+Podaci od interesa nalaze se u samo nekim od priloženih datoteka:
+```{r}
+branded_food <- read.csv("branded_food.csv")
+food_nutrient <- read.csv("food_nutrient.csv")
+food <- read.csv("food.csv")
+measure_unit <- read.csv("measure_unit.csv")
+nutrient <- read.csv("nutrient.csv")
+```
+
+* *branded_food* - sadrži osnovne podatke o namirnicama
+* *food_nutrient* - sadrži vrednosti i količine hranljivih materija za svaku od namirnica
+* *food* - sadrži opis i dodatne informacije o namirnicama
+* *measure_unit* - sadrži informacije o ključevima koji predstavljaju različite merne jedinice
+* *nutrient* - sadrži informacije o ključevima koji predstavljaju različite hranljive materije
+
+```{r include=FALSE}
+food_nutrient$data_points <- NULL
+food_nutrient$min <- NULL
+food_nutrient$max <- NULL
+food_nutrient$median <- NULL
+food_nutrient$footnote <- NULL
+food_nutrient$min_year_acquired <- NULL
+food$food_category_id <- NULL
+food$microbe_data <- NULL
+branded_food[is.na(branded_food$brand_name), 3] <- ""
+branded_food[is.na(branded_food$subbrand_name), 4] <- ""
+branded_food[is.na(branded_food$ingredients), 6] <- ""
+branded_food[is.na(branded_food$serving_size), 8] <- 0
+food_nutrient[is.na(food_nutrient$derivation_id), 5] <- 0
+food_description_table <- food[food$data_type == "branded_food", c(1,3,4)]
+branded_food <- merge(branded_food, food_description_table, by.x="fdc_id", by.y="fdc_id", all.x=T)
+```
+
+Radi preglednosti, podaci su spojeni u jednu tabelu koja sadrži sve podatke o namirnicama. Izbačene su nepotrebne kolone tabela *food* i *food_nutrient*, kao i sređene pojave tabele *branded_food* - *NA* vrednosti su u numeričkim obeležjima poput *derivation_id* postavljene na 0, dok su kategorijska obeležja imena i opisa postavljena na prazne stringove. Kolona *Ingredients* sadrži stringove koji predstavljaju tekstove na ambalaži proizvoda, te je pogodno eliminisati naznaku na šta se tekst odnosi:
+
+```{r}
+branded_food$ingredients <- gsub("INGREDIENTS*: ", "", branded_food$ingredients, ignore.case=T)
+branded_food$ingredients <- gsub("INGREDIENTS: ", "", branded_food$ingredients, ignore.case=T)
+branded_food$ingredients <- gsub("INGREDIENT: ", "", branded_food$ingredients, ignore.case=T)
+branded_food$ingredients <- gsub("MADE FROM: ", "", branded_food$ingredients, ignore.case=T)
+```
+
+Ispod je dat primer učitavanja kalorija, koje se nalaze pod imenom *Energy* u tabeli *food_nutrient*, pod odgovarajućim ključem. Postupak radi pravljenjem pomoćne tabele koja sadrži kalorijske vrednosti za svaku od namirnica. Za neke namirnice, ukupna kalorijska vrednost je prikazana po više stavki - odnosi se na npr. različita pakovanja iste hrane. Kako je broj kalorija skaliran u skupu, vrednosti se grupišu po proseku, te će za različita pakovanja iste namirnice kao kalorična vrednost biti uzet prosek.
+
+```{r}
+calorie_table <- food_nutrient[food_nutrient$nutrient_id == first(nutrient[nutrient$name == "Energy", 'id']), c('fdc_id','amount')]
+calorie_table <- calorie_table %>% group_by(fdc_id) %>% summarise(across(amount, mean))
+colnames(calorie_table)[2] <- "calories"
+branded_food <- merge(branded_food, calorie_table, by.x="fdc_id", by.y="fdc_id", all.x=T)
+```
+
+```{r include=FALSE}
+branded_food <- branded_food %>% drop_na(calories)
+
+median_calories <- median(branded_food$calories)
+branded_food <- branded_food %>% mutate(calories_category=ifelse(calories <= median_calories, "LOW", "HIGH"))
+
+protein_table <- food_nutrient[food_nutrient$nutrient_id == nutrient[nutrient$name == "Protein", 'id'], c('fdc_id','amount')]
+protein_table <- protein_table %>% group_by(fdc_id) %>% summarise(across(amount, mean))
+colnames(protein_table)[2] <- "protein"
+branded_food <- merge(branded_food, protein_table, by.x="fdc_id", by.y="fdc_id", all.x=T)
+
+#ukljucuje vlakna i secere, koji su posle dodati zasebno
+carb_table <- food_nutrient[food_nutrient$nutrient_id == nutrient[nutrient$name == "Carbohydrate, by difference", 'id'], c('fdc_id','amount')]
+carb_table <- carb_table %>% group_by(fdc_id) %>% summarise(across(amount, mean))
+colnames(carb_table)[2] <- "carbohydrates"
+branded_food <- merge(branded_food, carb_table, by.x="fdc_id", by.y="fdc_id", all.x=T)
+
+#masti, ukupno
+fat_table <- food_nutrient[food_nutrient$nutrient_id == nutrient[nutrient$name == "Total lipid (fat)", 'id'], c('fdc_id','amount')]
+fat_table <- fat_table %>% group_by(fdc_id) %>% summarise(across(amount, mean))
+colnames(fat_table)[2] <- "fats"
+branded_food <- merge(branded_food, fat_table, by.x="fdc_id", by.y="fdc_id", all.x=T)
+
+sugar_table <- food_nutrient[food_nutrient$nutrient_id == nutrient[nutrient$name == "Total Sugars", 'id'], c('fdc_id','amount')]
+sugar_table <- sugar_table %>% group_by(fdc_id) %>% summarise(across(amount, mean))
+colnames(sugar_table)[2] <- "sugars"
+branded_food <- merge(branded_food, sugar_table, by.x="fdc_id", by.y="fdc_id", all.x=T)
+
+fiber_table <- food_nutrient[food_nutrient$nutrient_id == nutrient[nutrient$name == "Fiber, total dietary", 'id'], c('fdc_id','amount')]
+fiber_table <- fiber_table %>% group_by(fdc_id) %>% summarise(across(amount, mean))
+colnames(fiber_table)[2] <- "fiber"
+branded_food <- merge(branded_food, fiber_table, by.x="fdc_id", by.y="fdc_id", all.x=T)
+```
+
+Slično kalorijama, potrebno je dodati sledeće makronutriente za analizu:
+  * Proteine, date pod nazivom *Protein*
+  * Masti, date pod nazivom *Total lipid (fat)*
+  * Ugljene hidrate, što obuhvata šećere i vlakna, date pod nazivom *Carbohydrate, by difference*, što se odnosi na metod izračunavanja količine ugljenih hidrata u hrani
+  * Šećere, date pod nazivom *Total Sugars*
+  * Vlakna, data pod nazivom *Fiber, total dietary*
+  
+Potom je potrebno srediti kategorije namirnica. Odabrana je kategorizacija po 7 grupa:
+ * Meso i jaja
+ * Mlečni proizvodi
+ * Žitarice i mahunarke
+ * Slatkiši
+ * Voće i povrće
+ * Napitci
+ * Supe, namazi, mešavina - opšta kategorija
+ 
+Ručno su određene kategorije iz početnog skupa u ove navedene kategorije, potom su dodeljene vrednosti u tabelu.
+Spram količine kalorija, napravljena je podela na visoko-kalorične i nisko-kalorične namirnice.
+
+```{r include=FALSE}
+unique_cats <- data.frame(unique(branded_food$branded_food_category))
+names(unique_cats) <- "categories"
+unique_cats$category_groups_num <- c(0, 5, 2, 4, 4, 3, 5, 5, 3, 2, 3, 5, 6, 5, 4, 6, 6, 5, 5, 2, 6, 6, 5, 6, 4, 1, 5, 6, 4, 6, 2, 4, 5, 2, 2, 3, 1, 6, 5, 5, 5, 6, 2, 6, 6, 2, 2, 4, 6, 6, 3, 5, 5, 5, 6, 5, 2, 5, 3, 4, 5, 6, 3, 5, 1, 4, 4, 4, 6, 6, 5, 5, 4, 2, 6, 1, 5, 5, 6, 3, 5, 7, 6, 4, 1, 2, 2, 4, 3, 4, 3, 5, 4, 6, 2, 3, 3, 1, 6, 2, 3, 5, 4, 2, 2, 5, 4, 3, 3, 3, 6, 6, 5, 4, 5, 1, 6, 4, 4, 5, 6, 5, 5, 3, 4, 2, 2, 2, 6, 5, 2, 3, 3, 6, 1, 5, 7, 3, 6, 6, 7, 7, 7, 7, 7, 7, 5, 5, 6, 6, 2, 1, 6, 6, 2, 6, 7, 7, 5, 2, 7, 6, 5, 6, 6, 6, 2, 6, 7, 6, 6, 6, 2, 3, 2, 6, 6, 7, 6, 2, 3, 5, 4, 5, 5, 4, 5, 4, 1, 5, 2, 6, 7, 4, 5, 7, 4, 4, 3, 2, 6, 6, 6, 6, 4, 4, 7, 5, 6, 5, 6, 6, 1, 5, 1, 7, 3, 5, 1, 5, 3, 3, 1, 2, 7, 5, 5, 6, 2, 3, 3, 7, 4, 3, 3, 2, 6, 6, 7, 6, 3, 2, 3, 7, 5, 2, 3, 3, 7, 3, 2, 5, 2, 2, 6, 6, 1, 6, 3, 3, 4, 5, 2, 6, 4, 3, 4, 6, 6, 5, 2, 5, 3, 4, 4, 6, 6, 3, 3, 2, 5, 7, 4, 3, 2, 6, 7, 4, 1, 2, 5, 5, 1, 2, 4, 6, 5, 5, 4, 5, 5, 5, 3, 3, 5, 3, 3, 4, 4, 5, 4, 1, 2, 2, 3, 3, 3, 5, 1, 2, 5, 7, 7, 6, 6, 2, 2, 5, 5, 1, 6, 1, 3, 7, 1, 3, 3, 5, 2, 5, 4, 7, 6, 6, 5, 3, 4, 6, 2, 3, 6, 4, 2, 4, 7, 3, 2, 2, 5, 4, 3, 6, 6, 3, 3, 3, 5, 5, 1, 6, 5, 5, 3, 6, 2, 3, 5, 3, 6, 6, 3, 4, 3, 6, 5, 3, 5, 5, 6, 5, 5, 3, 5, 3, 3, 3, 3, 1, 4, 6, 3, 7, 6, 1, 5, 2, 6, 2, 6, 5, 4, 2, 2, 2, 4, 4, 3, 4, 3, 3, 2, 5, 2, 4, 6, 2)
+groups_table <- data.frame(c(0,1,2,3,4,5,6,7), c(NA,"Dairy","Fruits and Vegetables", "Meat and Eggs", "Sugars and Sweets", "Cereals and Legumes", "Soups, Mixes, Dressings", "Drinks"))
+names(groups_table) <- c("category_groups_num", "category_groups")
+unique_cats <- merge(unique_cats, groups_table, by.x="category_groups_num", by.y="category_groups_num", all.x)
+#unique_cats$category_groups_num <- NULL
+branded_food <- merge(branded_food, unique_cats, by.x="branded_food_category", by.y="categories", all.x)
+```
+Bitno je napomenuti da je u dokumentaciji skupa podataka navedeno da su podaci vezani za nutrijente standardizovani na po 100g proizvoda, dok postoje pojave u skupu koje imaju neke od navedenih vrednosti veće od 100, što je nemoguće, te su te vrednosti uklonjene. Slično za kalorije, koje su navedene u KCAL, gde nije moguće unutar 100g proizvoda imati više od 1000KCAL energetsku vrednost. Kako nisu pravilno date merne jedinice, te pojave se izbacuju iz skupa.
+
+```{r}
+branded_food <- branded_food[branded_food$calories<=1000, ]
+branded_food <- branded_food[branded_food$carbohydrates<=100, ]
+branded_food <- branded_food[branded_food$protein<=100, ]
+branded_food <- branded_food[branded_food$fats<=100, ]
+branded_food <- branded_food[branded_food$sugars<=100, ]
+branded_food <- branded_food[branded_food$fiber<=100, ]
+
+branded_food$carbohydrates <- pmax(branded_food$carbohydrates, branded_food$sugars) 
+branded_food$carbohydrates <- pmax(branded_food$carbohydrates, branded_food$fiber)  
+```
+
+Takođe, nije moguće da proizvod ima više šećera ili više vlakana od ugljenih hidrata, pa se u slučaju da je vrednost kolona *sugars* ili *fiber* veća od vrednosti ugljenih hidrata, ugljeni hidrati postavljaju na odgovarajuću vrednost
+
+Nad sređenim skupom možemo videti karakteristike obeležja od interesa:
+```{r include=FALSE}
+branded_food <- branded_food[, c(2:5, 21, 6:13, 22, 14:20, 1, 30, 31, 23:29)]
+branded_food <- branded_food %>% drop_na(category_groups)
+rm(calorie_table, carb_table, fat_table, fiber_table, food, food_description_table, food_nutrient, groups_table, measure_unit, nutrient, protein_table, sugar_table, unique_cats, median_calories)
+
+branded_food[is.na(branded_food$carbohydrates), 28] <- 0
+branded_food[is.na(branded_food$protein), 27] <- 0
+branded_food[is.na(branded_food$fats), 29] <- 0
+branded_food[is.na(branded_food$sugars), 30] <- 0
+branded_food[is.na(branded_food$fiber), 31] <- 0
+```
+
+```{r}
+bar_calories <- branded_food %>% group_by(calories_category) %>% summarise(n=n())
+barplot(bar_calories$n, names=c("HIGH","LOW"), main="Podela namirnica spram kalorija", xlab="Kaloricnost", ylab="Broj namirnica", ylim=range(pretty(c(0, bar_calories$n))))
+```
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
