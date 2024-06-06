@@ -114,6 +114,17 @@ Potom je potrebno srediti kategorije namirnica. Odabrana je kategorizacija po 7 
 Ručno su određene kategorije iz početnog skupa u ove navedene kategorije, potom su dodeljene vrednosti u tabelu.
 Spram količine kalorija, napravljena je podela na visoko-kalorične i nisko-kalorične namirnice.
 
+Pojave sa nevalidnim vrednostima su bile retke, svega oko 4000 hiljada za skup od oko 1.8 miliona pojava. Te pojave nisu izbačene, već su njihove vrednosti postavljene na 0, gde će se za različite metode koristiti ili ignorisati te vrednosti:
+
+```{r eval=FALSE}
+branded_food <- branded_food %>% drop_na(category_groups)
+branded_food[is.na(branded_food$carbohydrates), 28] <- 0
+branded_food[is.na(branded_food$protein), 27] <- 0
+branded_food[is.na(branded_food$fats), 29] <- 0
+branded_food[is.na(branded_food$sugars), 30] <- 0
+branded_food[is.na(branded_food$fiber), 31] <- 0
+```
+
 Bitno je napomenuti da je u dokumentaciji skupa podataka navedeno da su podaci vezani za nutrijente standardizovani na po 100g proizvoda, dok postoje pojave u skupu koje imaju neke od navedenih vrednosti veće od 100, što je nemoguće, te su te vrednosti uklonjene. Slično za kalorije, koje su navedene u KCAL, gde nije moguće unutar 100g proizvoda imati više od 1000KCAL energetsku vrednost. Kako nisu pravilno date merne jedinice, te pojave se izbacuju iz skupa.
 
 ```{r eval=FALSE}
@@ -220,14 +231,55 @@ rm(i)
 rm(remainder)
 ```
 
-Potom su pokrenute odgovarajuće R funkcije, i rezultati su prikazani na grafiku ispod:
+Za svaku od metoda podešavaju se odgovarajući parametri. Što se tiče metode *k najbližih suseda*, podešavan je parametar k, kao i odrađena metoda za različite formule odnosno kombinacije makronutrijenata. Istražena je veza između samo osnovnih makronutrienata i makronutrienata uključujući šećer i vlakna. Što se tiče metode potpornih vektora, odrađeno je testiranje spram različitih funkcija korišćenih kao kernel funkcija i tu su isprobane *sigmoidna* *polinomijalna* i *radijalna*. Najbolje rezultate dala je radijalna, dok najgore sigmoidalna kernel funkcija. Treća metoda klasifikacije koja je korišćena je *random forrest*, sa podešavanim brojem stabala. Sve metode su dale veliku preciznost, što je i očekivano za odnos kalorija i makronutrijenata. Postoje i formule koje aproksimiraju konkretan broj kalorija spram makronutrijenata. Deo koda prikazan ispod pokazuje primenu unakrsne validacije za metodu *k unakrsnih suseda*, i rezultati su prikazani na grafiku ispod:
+
+```{r eval=FALSE}
+total_perf <- list()
+for(k_iter in 1:6) {
+  total_perf[[k_iter]] <- 0
+  for(i in 1:5) {
+    if(k_iter %% 2 == 1) {
+      rez_knn <- knn(select(train_sets[[i]], protein, fats, carbohydrates), select(test_sets[[i]], protein, fats, carbohydrates), train_sets[[i]]$calories_category, k = (k_iter) * 5, use.all = FALSE)
+    } else {
+      rez_knn <- knn(select(train_sets[[i]], protein, fats, carbohydrates, sugars, fiber), select(test_sets[[i]], protein, fats, carbohydrates, sugars, fiber), train_sets[[i]]$calories_category, k = (k_iter-1) * 5, use.all = FALSE)
+    }
+    perf_knn <- rez_knn == as.factor(test_sets[[i]]$calories_category)
+    perf_knn <- sum(perf_knn, na.rm=TRUE) / length(perf_knn)
+    total_perf[[k_iter]] <- total_perf[[k_iter]] + perf_knn
+  }
+  total_perf[[k_iter]] <- total_perf[[k_iter]] / 5
+}
+total_perf_knn <- total_perf
+```
 
 ![](prva.png){width=100%}
 
-##Metode klasifikacije za kategorije grupa hrana i njihova preciznost
+##  Metode klasifikacije za kategorije grupa hrana i njihova preciznost
 
-Korišćene su metode klasifikacije iz alata *Apache Spark*, i odrađena je klasifikacija koristeći *Naive Bayes*, *Logistička Regresija* i *Random Forrest*
-Ispod su dati F1 skorovi za različite metode:
+Korišćene su metode klasifikacije iz alata *Apache Spark*, za šta je potrebno uspostaviti konekciju i proslediti tabelu na spark klaster. Ovo je odrađeno ispisom tabele u CSV, potom učitavanja novokreirane datoteke u Spark. Na kraju je nakon obrade zatvorena konekcija.
+
+```{r eval=FALSE}
+konekcija <- spark_connect(master="local")
+spark_web(konekcija)
+food_arranged <- food_arranged %>% drop_na()
+fwrite(food_arranged, file="~/Desktop/master/rvpii/projekat/FDC/food_arranged.csv")
+food_arranged_tbl <- spark_read_csv(konekcija, name="food_arranged_tbl", path="~/Desktop/master/rvpii/projekat/FDC/food_arranged.csv", memory=T, infer_schema=F, columns=list(publication_date="character",modified_date="character",available_date="character",market_country="character",discontinued_date="character",category_groups_num="integer",category_groups="character",calories="double",calories_category="character",protein="double",carbohydrates="double",fats="double",sugars="double",fiber="double"))
+
+```
+
+Odrađena je klasifikacija koristeći *Naive Bayes*, *Logistička Regresija* i *Random Forrest* .Performanse su predstavljene koristeći F1 skor. *Naive Bayes* metoda je ispitana za različit broj maksimalnih iteracija, koje nisu doprinele poboljšanju u F1 skoru, a ovaj metod klasifikacije je generalno pokazao najgore performanse od svih modela. Očekivane performanse su dosta niže nego za prethodnu klasifikaciju. Kako je klasifikacija kompleksnija zbog većeg broja kategorijskih obečežja (sedam), *Naive Bayes* nije prikladan metod za pravljenje modela. *Logistička regresija* pokazana je kao znatno bolji metod, sa većim performansama. Zavisi od maksimalnog broja iteracija, gde je najbolja performansa postignuta odabirom parametra 5. *Random Forrest* se pokazala kao najuspešnija metoda, jer je F1 skor za veču dubinu stabala (dubinu 5) preko 0.6. Povećanje broja stabala je marginalno poboljšalo performanse, ali je najveći uticaj imalo povećanje dubine. Ispod su dati F1 skorovi za različite metode, kao i grafički prikaz:
+
+```{r eval=FALSE}
+forr_pipeline <- ml_pipeline(konekcija) %>% 
+  ft_dplyr_transformer(tbl=food_arranged_tbl %>% filter(!is.na(protein) & !is.na(fats) & !is.na(carbohydrates) & !is.na(sugars) & !is.na(fiber) & !is.na(category_groups_num))) %>%
+  ft_r_formula(category_groups_num ~ protein + fats + carbohydrates) %>% 
+  ml_random_forest_classifier(label_col = "category_groups_num")
+fv <- ml_cross_validator(konekcija, estimator=forr_pipeline, estimator_param_maps=list(random_forest=list(num_trees = c(3,5), max_depth = c(3, 5))),evaluator=ml_multiclass_classification_evaluator(konekcija), num_folds = 5, parallelism = 4)
+fv_model <- ml_fit(fv, food_arranged_tbl)
+fv_metrics <- ml_validation_metrics(fv_model)
+plot(fv_metrics$max_depth_1, fv_metrics$f1)
+plot(fv_metrics$num_trees_1, fv_metrics$f1)
+```
 
 Naive Bayes
 -----------
@@ -261,6 +313,9 @@ Table: Random Forrest F1
 
 Klasterizacija spram šećera i vlakana:
 --------------------------------------
+
+Odabrana metoda za obe klasterizacije je *metod k sredina*, gde je odrađena klasterizacija spram šećera i vlakana, kao i spram glavnih makronutrijenata: proteina, masti, ugljenih hidrata. Korišćene su dve funkcije za evaluaciju, na kraju je uzeta mera Siluete.
+
 * 0.8589299 za 2 klastera
 * 0.8157849 za 3 klastera
 * 0.7488397 za 4 klastera
@@ -268,4 +323,17 @@ Klasterizacija spram šećera i vlakana:
 
 Klasterizacija spram proteina, masti, ugljenih hidrata:
 -------------------------------------------------------
+
+```{r eval=FALSE}
+eval_vec <- c(0,0,0,0,0,0,0,0,0,0)
+eval_s2 <- c(0,0,0,0,0,0,0,0,0,0)
+for(i in 1:10) {
+  klast <- ml_kmeans(food_arranged_tbl, calories_category ~ protein + fats + carbohydrates, k = i+1, max_iter = 25, init_mode = "random")
+  klast$model$summary$cluster_sizes()
+  klast.eval <- ml_evaluate(klast, food_arranged_tbl %>% select(protein, fats, carbohydrates))
+  eval_s2[i] <- ml_compute_silhouette_measure(klast, food_arranged_tbl, distance_measure = "Manhattan")
+  eval_vec[i] <- klast.eval
+}
+```
+
 ![](klast2.png){width=100%}
