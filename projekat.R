@@ -143,6 +143,10 @@ qplot(carbohydrates, fats, data=rand_foods, colour=calories_category)
 qplot(carbohydrates, protein, data=rand_foods, colour=calories_category)
 qplot(carbohydrates, fats, data=rand_foods, colour=category_groups)
 qplot(carbohydrates, protein, data=rand_foods, colour=category_groups)
+qplot(carbohydrates, sugars, data=rand_foods, colour=category_groups)
+qplot(carbohydrates, fiber, data=rand_foods, colour=category_groups)
+
+
 
 food_arranged <- branded_food
 
@@ -289,6 +293,7 @@ nbay_pipeline <- ml_pipeline(konekcija) %>%
 bv <- ml_cross_validator(konekcija, estimator=nbay_pipeline, estimator_param_maps=list(naive_bayes=list(model_type = "multinomial", smoothing = c(1,2,3))),evaluator=ml_multiclass_classification_evaluator(konekcija), num_folds = 5, parallelism = 4)
 bv_model <- ml_fit(bv, food_arranged_tbl)
 bv_metrics <- ml_validation_metrics(bv_model)
+plot(bv_metrics$smoothing_1, bv_metrics$f1)
 
 
 #klasifikacija 5 - SPARK
@@ -313,7 +318,15 @@ fv_metrics <- ml_validation_metrics(fv_model)
 plot(fv_metrics$max_depth_1, fv_metrics$f1)
 plot(fv_metrics$num_trees_1, fv_metrics$f1)
 
-#f1 = 2 / ((1/prec) + (1/sens))
+tpv <- c(bv_metrics$f1, lv_metrics$f1, fv_metrics$f1)
+gv <- c(1,1,1,2,2,2,3,3,3,3)
+ld <- c("NB - smoothing = 1", "NB - smoothing = 2", "NB - smoothing = 3", "LV - max iteracija = 3", "LV - max iteracija = 5"
+                     ,"LV - max iteracija = 10", "RF - broj stabala = 3, dubina = 3", "RF - broj stabala = 5, dubina = 3",
+                     "RF - broj stabala = 3, dubina = 5", "RF - broj stabala = 5, dubina = 5")
+cd <- c("purple", "orange", "brown")
+dotchart(tpv, labels=ld, groups = gv, gcolor = cd,
+         color = cd[gv],
+         cex = 0.9,  pch = 22, xlab = "F1 Score")
 
 #klasterizacija 1
 eval_vec <- c(0,0,0,0)
@@ -325,6 +338,7 @@ for(i in 1:4) {
   eval_s1[i] <- ml_compute_silhouette_measure(klast, food_arranged_tbl)
   eval_vec[i] <- klast.eval
 }
+
 plot(c(2:5), eval_s1)
 
 #klasterizacija 2
@@ -334,8 +348,9 @@ for(i in 1:10) {
   klast <- ml_kmeans(food_arranged_tbl, calories_category ~ protein + fats + carbohydrates, k = i+1, max_iter = 25, init_mode = "random")
   klast$model$summary$cluster_sizes()
   klast.eval <- ml_evaluate(klast, food_arranged_tbl %>% select(protein, fats, carbohydrates))
-  eval_s2[i] <- ml_compute_silhouette_measure(klast, food_arranged_tbl)
+  eval_s2[i] <- ml_compute_silhouette_measure(klast, food_arranged_tbl, distance_measure = "Manhattan")
   eval_vec[i] <- klast.eval
 }
-plot(c(2:11), eval_s2)
+plot(c(2:11), eval_s2, xlab="Broj klastera", ylab="Silhouette measure")
+
 spark_disconnect(konekcija)
