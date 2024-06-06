@@ -1,3 +1,3 @@
-# This is a markdown title
+Relja Mihić, E2 5 2023
 
-This is a markdown paragraph.
+nedovršeno, nije napravljen do kraja izveštaj i nije lepo prikazana klasifikacija/klasterizacija
